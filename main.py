@@ -1,38 +1,60 @@
-from flask import Flask, request, jsonify
-import requests
-import time
 import os
+import hashlib
+import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Route di test home - utile per verifica deploy
-@app.route('/', methods=['GET'])
-def home():
-    return "API online - Custom Railway Deploy", 200
+def hash_sha256(val):
+    if isinstance(val, list):
+        return [hashlib.sha256(str(v).encode('utf-8')).hexdigest() for v in val]
+    if val is None:
+        return None
+    return hashlib.sha256(str(val).encode('utf-8')).hexdigest()
 
-# Route Facebook event POST
 @app.route('/fb-event', methods=['POST'])
 def fb_event():
-    data = request.json
-    event_name = data.get('event_name', 'Purchase')
-    event_time = int(time.time())
-    user_data = data.get('user_data', {})  # es. { "em": "email_hash_sha256" }
-    custom_data = data.get('custom_data', {})  # es. { "currency": "EUR", "value": 49.90 }
-    payload = {
-        "data": [{
-            "event_name": event_name,
-            "event_time": event_time,
-            "user_data": user_data,
-            "custom_data": custom_data,
-            "action_source": "website"
-        }],
-        "access_token": os.getenv("ACCESS_TOKEN")
-    }
-    pixel_id = os.getenv("PIXEL_ID")
-    url = f'https://graph.facebook.com/v19.0/{pixel_id}/events'
-    res = requests.post(url, json=payload)
-    return jsonify(res.json())
+    # 1. Ricevi payload
+    data = request.get_json(force=True)
+    user_data = data.get('user_data', {})
 
-# Codice per debug locale, da commentare/rimuovere su Railway
-if __name__ == '__main__':
-    app.run(port=8080, debug=True)
+    # 2. Hash automatico dei dati richiesti da Meta (em, ph, fn, ln)
+    for key in ['em', 'ph', 'fn', 'ln']:
+        if key in user_data:
+            user_data[key] = hash_sha256(user_data[key])
+
+    # 3. Prepara il payload da inoltrare a Facebook Conversion API
+    fb_payload = {
+        "event_name": data.get("event_name"),
+        "event_time": data.get("event_time"),
+        "user_data": user_data,
+        "custom_data": data.get("custom_data", {}),
+        "action_source": data.get("action_source", "website")
+    }
+
+    access_token = os.environ['ACCESS_TOKEN']
+    pixel_id = os.environ['PIXEL_ID']
+
+    fb_url = f"https://graph.facebook.com/v18.0/{pixel_id}/events?access_token={access_token}"
+
+    # 4. Inoltra l'evento a Facebook
+    fb_data = {
+        "data": [fb_payload]
+    }
+    fb_response = requests.post(fb_url, json=fb_data)
+    fb_result = fb_response.json()
+
+    # 5. Rispondi al client
+    return jsonify({
+        "sent_to_facebook": fb_data,
+        "facebook_response": fb_result
+    }), fb_response.status_code
+
+# Optional: Home test
+@app.route("/")
+def home():
+    return "API is running!"
+
+# Flask launch in debug (per sviluppo locale)
+if __name__ == "__main__":
+    app.run(debug=True)
