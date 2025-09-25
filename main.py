@@ -1,9 +1,15 @@
 import os
+import time
 import hashlib
 import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+
+# Configura questi valori con il tuo store
+ECWID_STORE_ID = '29517085'
+ECWID_SECRET_TOKEN = 'secret_sCWKvQc4Ta3exmxdrBUZCYwib6TgTC9Q'
+RAILWAY_FB_API = 'https://errandboy-fb-api-production.up.railway.app/fb-event'
 
 def hash_sha256(val):
     if isinstance(val, list):
@@ -12,49 +18,55 @@ def hash_sha256(val):
         return None
     return hashlib.sha256(str(val).encode('utf-8')).hexdigest()
 
-@app.route('/fb-event', methods=['POST'])
-def fb_event():
-    # 1. Ricevi payload
-    data = request.get_json(force=True)
-    user_data = data.get('user_data', {})
+def get_ecwid_orders():
+    url = f"https://app.ecwid.com/api/v3/{ECWID_STORE_ID}/orders"
+    headers = {"Authorization": f"Bearer {ECWID_SECRET_TOKEN}"}
+    resp = requests.get(url, headers=headers)
+    return resp.json().get("items", [])
 
-    # 2. Hash automatico dei dati richiesti da Meta (em, ph, fn, ln)
-    for key in ['em', 'ph', 'fn', 'ln']:
-        if key in user_data:
-            user_data[key] = hash_sha256(user_data[key])
+def forward_order_to_facebook(order):
+    name = order.get("billingPerson", {}).get("name", "")
+    first_name = name.split()[0] if name else ""
+    last_name = name.split()[-1] if name and len(name.split()) > 1 else ""
 
-    # 3. Prepara il payload da inoltrare a Facebook Conversion API
-    fb_payload = {
-        "event_name": data.get("event_name"),
-        "event_time": data.get("event_time"),
-        "user_data": user_data,
-        "custom_data": data.get("custom_data", {}),
-        "action_source": data.get("action_source", "website")
+    event_data = {
+        "event_name": "Purchase",
+        "event_time": int(time.time()),
+        "user_data": {
+            "em": [order.get("email", "")],
+            "fn": [first_name],
+            "ln": [last_name],
+            "ph": [order.get("billingPerson", {}).get("phone", "")]
+        },
+        "custom_data": {
+            "currency": order.get("totalCurrency", "EUR"),
+            "value": order.get("total", 0),
+            "content_ids": [str(p.get("productId")) for p in order.get("items", [])],
+            "content_type": "product"
+        },
+        "action_source": "website"
     }
+    resp = requests.post(RAILWAY_FB_API, json=event_data)
+    try:
+        return resp.json()
+    except Exception:
+        return {"error": "BAD RESPONSE", "body": resp.text}
 
-    access_token = os.environ['ACCESS_TOKEN']
-    pixel_id = os.environ['PIXEL_ID']
+@app.route("/poll-ecwid-orders", methods=["GET"])
+def poll_and_forward():
+    orders = get_ecwid_orders()
+    results = []
+    for order in orders:
+        fb_resp = forward_order_to_facebook(order)
+        results.append({
+            "order_id": order.get("id"),
+            "fb_response": fb_resp
+        })
+    return jsonify(results)
 
-    fb_url = f"https://graph.facebook.com/v18.0/{pixel_id}/events?access_token={access_token}"
-
-    # 4. Inoltra l'evento a Facebook
-    fb_data = {
-        "data": [fb_payload]
-    }
-    fb_response = requests.post(fb_url, json=fb_data)
-    fb_result = fb_response.json()
-
-    # 5. Rispondi al client
-    return jsonify({
-        "sent_to_facebook": fb_data,
-        "facebook_response": fb_result
-    }), fb_response.status_code
-
-# Optional: Home test
 @app.route("/")
 def home():
-    return "API is running!"
+    return "Ecwid Conversion API integration live!"
 
-# Flask launch in debug (per sviluppo locale)
 if __name__ == "__main__":
     app.run(debug=True)
