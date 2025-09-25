@@ -1,6 +1,5 @@
 import os
 import time
-import hashlib
 import requests
 from flask import Flask, request, jsonify
 
@@ -13,8 +12,8 @@ RAILWAY_FB_API = 'https://errandboy-fb-api-production.up.railway.app/fb-event'
 def get_ecwid(endpoint):
     url = f"https://app.ecwid.com/api/v3/{ECWID_STORE_ID}/{endpoint}"
     headers = {"Authorization": f"Bearer {ECWID_SECRET_TOKEN}"}
-    resp = requests.get(url, headers=headers)
-    return resp.json().get("items", [])
+    r = requests.get(url, headers=headers)
+    return r.json().get("items", [])
 
 def forward_to_facebook(event_data):
     resp = requests.post(RAILWAY_FB_API, json=event_data)
@@ -28,27 +27,28 @@ def poll_orders():
     orders = get_ecwid("orders")
     results = []
     for order in orders:
-        name = order.get("billingPerson", {}).get("name", "")
+        billing = order.get("billingPerson", {})
+        name = billing.get("name", "")
         first_name = name.split()[0] if name else ""
         last_name = name.split()[-1] if name and len(name.split()) > 1 else ""
-        event_data = {
+        data = {
             "event_name": "Purchase",
             "event_time": int(time.time()),
             "user_data": {
                 "em": [order.get("email", "")],
                 "fn": [first_name],
                 "ln": [last_name],
-                "ph": [order.get("billingPerson", {}).get("phone", "")]
+                "ph": [billing.get("phone", "")]
             },
             "custom_data": {
                 "currency": order.get("totalCurrency", "EUR"),
                 "value": order.get("total", 0),
-                "content_ids": [str(p.get("productId")) for p in order.get("items", [])],
+                "content_ids": [str(i.get("productId")) for i in order.get("items", [])],
                 "content_type": "product"
             },
             "action_source": "website"
         }
-        results.append({"order_id": order.get("id"), "fb_response": forward_to_facebook(event_data)})
+        results.append({"order_id": order.get("id"), "fb_response": forward_to_facebook(data)})
     return jsonify(results)
 
 @app.route("/poll-ecwid-carts", methods=["GET"])
@@ -60,7 +60,7 @@ def poll_carts():
         name = person.get("name", "")
         first_name = name.split()[0] if name else ""
         last_name = name.split()[-1] if name and len(name.split()) > 1 else ""
-        event_data = {
+        data = {
             "event_name": "AddToCart",
             "event_time": int(time.time()),
             "user_data": {
@@ -77,7 +77,7 @@ def poll_carts():
             },
             "action_source": "website"
         }
-        results.append({"cart_id": cart.get("id"), "fb_response": forward_to_facebook(event_data)})
+        results.append({"cart_id": cart.get("id"), "fb_response": forward_to_facebook(data)})
     return jsonify(results)
 
 @app.route("/poll-ecwid-leads", methods=["GET"])
@@ -88,7 +88,7 @@ def poll_leads():
         name = cust.get("name", "")
         first_name = name.split()[0] if name else ""
         last_name = name.split()[-1] if name and len(name.split()) > 1 else ""
-        event_data = {
+        data = {
             "event_name": "Lead",
             "event_time": int(time.time()),
             "user_data": {
@@ -102,12 +102,56 @@ def poll_leads():
             },
             "action_source": "website"
         }
-        results.append({"customer_id": cust.get("id"), "fb_response": forward_to_facebook(event_data)})
+        results.append({"customer_id": cust.get("id"), "fb_response": forward_to_facebook(data)})
+    return jsonify(results)
+
+@app.route("/poll-ecwid-viewcontent", methods=["GET"])
+def poll_viewcontent():
+    products = get_ecwid("products")
+    results = []
+    for prod in products:
+        data = {
+            "event_name": "ViewContent",
+            "event_time": int(time.time()),
+            "user_data": {
+                # Qui puoi migliorare se hai dati cliente/sessione!
+                "em": [prod.get("createdBy") or ""]
+            },
+            "custom_data": {
+                "currency": prod.get("defaultDisplayedPriceFormatted", "EUR"),
+                "content_ids": [str(prod.get("id"))],
+                "content_type": "product"
+            },
+            "action_source": "website"
+        }
+        results.append({"product_id": prod.get("id"), "fb_response": forward_to_facebook(data)})
+    return jsonify(results)
+
+@app.route("/poll-ecwid-search", methods=["GET"])
+def poll_search():
+    # Ecwid non salva tutte le ricerche degli utenti lato API pubbliche!
+    # Ma se hai logs/search custom, puoi adattare così:
+    # Qui mostro un esempio statico che puoi adattare ai tuoi dati reali:
+    search_events = [{"email": "ricerca@email.com", "search_string": "fertilizzante"}]
+    results = []
+    for evt in search_events:
+        data = {
+            "event_name": "Search",
+            "event_time": int(time.time()),
+            "user_data": {
+                "em": [evt.get("email", "")]
+            },
+            "custom_data": {
+                "search_string": evt.get("search_string", "")
+            },
+            "action_source": "website"
+        }
+        results.append({"search": evt.get("search_string"), "fb_response": forward_to_facebook(data)})
     return jsonify(results)
 
 @app.route("/")
 def home():
-    return "Ecwid Conversion API integration is live! /poll-ecwid-orders /poll-ecwid-carts /poll-ecwid-leads"
+    return "Ecwid <-> Facebook Conversion API Bridge: /poll-ecwid-orders /poll-ecwid-carts /poll-ecwid-leads /poll-ecwid-viewcontent /poll-ecwid-search /fb-event"
 
 if __name__ == "__main__":
     app.run(debug=True)
